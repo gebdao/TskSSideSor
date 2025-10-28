@@ -1,0 +1,99 @@
+name: Generate Structure Report
+
+on:
+  workflow_dispatch:
+    inputs:
+      depth:
+        description: "Max directory depth"
+        type: number
+        required: true
+        default: 4
+      ignore:
+        description: "Ignore patterns (| separated)"
+        type: string
+        required: false
+        default: ".git|bin|obj|Library|Temp|Logs|.vs|node_modules|dist|build|.idea|.vscode"
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tree python3
+
+      - name: Generate tree
+        run: |
+          tree -L "${{ github.event.inputs.depth }}" -a \
+            -I "${{ github.event.inputs.ignore }}" \
+            > repo_tree.txt
+
+      - name: Generate Markdown report
+        run: |
+          cat << 'PY' > report.py
+          import os
+          from collections import Counter
+          EXCL = set("${{ github.event.inputs.ignore }}".split("|"))
+          ROOT = os.getcwd()
+          MAXD = int("${{ github.event.inputs.depth }}")
+
+          def skip(path):
+            parts = os.path.relpath(path, ROOT).split(os.sep)
+            return any(p in EXCL for p in parts)
+
+          def walk(path, d=0):
+            if d>MAXD or skip(path): return []
+            out=[]
+            try:
+              for n in sorted(os.listdir(path)):
+                f=os.path.join(path,n)
+                if skip(f): continue
+                out.append((d,f,os.path.isdir(f)))
+                if os.path.isdir(f):
+                  out+=walk(f,d+1)
+            except: pass
+            return out
+
+          def ext(f):
+            b=os.path.basename(f); i=b.rfind('.')
+            return b[i+1:].lower() if i!=-1 else ''
+
+          items = walk(ROOT)
+          files = [f for _,f,isdir in items if not isdir]
+          by_ext = Counter(ext(f) for f in files)
+          top = Counter(os.path.relpath(os.path.dirname(f), ROOT).split(os.sep)[0] or "(root)" for f in files)
+
+          md = []
+          md.append("# STRUCTURE REPORT")
+          md.append(f"- Depth: {MAXD}")
+          md.append(f"- Ignore: {' | '.join(EXCL)}")
+          md.append("")
+          md.append("## Tree (depth ≤ %d)" % MAXD)
+          for d,f,isdir in items:
+            rel=os.path.relpath(f, ROOT)
+            md.append("  "*d + ("📁 " if isdir else "📄 ") + rel)
+
+          md += ["", "## Stats by extension", ""]
+          for k,v in by_ext.most_common():
+            md.append(f"- `{k or '(no-ext)'}`: {v} files")
+
+          md += ["", "## Top-level directories by file count", ""]
+          for k,v in top.most_common():
+            md.append(f"- `{k}`: {v} files")
+
+          open("STRUCTURE_REPORT.md","w",encoding="utf-8").write("\n".join(md))
+          print("Wrote STRUCTURE_REPORT.md")
+          PY
+          python3 report.py
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: structure-report
+          path: |
+            repo_tree.txt
+            STRUCTURE_REPORT.md
